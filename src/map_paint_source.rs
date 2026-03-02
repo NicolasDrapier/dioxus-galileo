@@ -1,5 +1,8 @@
+use std::sync::mpsc::{Receiver, Sender, channel};
+
 use dioxus_native::{CustomPaintCtx, CustomPaintSource, DeviceHandle, TextureHandle};
-use galileo::galileo_types::cartesian::Size;
+use galileo::control::{EventProcessor, MapController, MouseButton, RawUserEvent};
+use galileo::galileo_types::cartesian::{Point2, Size};
 use galileo::layer::raster_tile_layer::RasterTileLayerBuilder;
 use galileo::render::WgpuRenderer;
 use galileo::{Map, MapBuilder};
@@ -8,9 +11,21 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
-/// Texture format matching Galileo's internal `TARGET_TEXTURE_FORMAT`.
-/// Must match for MSAA resolve compatibility.
 const MAP_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
+
+pub enum MapEvent {
+    PointerMoved(f64, f64),
+    ButtonPressed(MapMouseButton),
+    ButtonReleased(MapMouseButton),
+    Scroll(f64),
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum MapMouseButton {
+    Left,
+    Right,
+    Middle,
+}
 
 struct TextureAndHandle {
     texture: Texture,
@@ -20,6 +35,7 @@ struct TextureAndHandle {
 struct ActiveRenderer {
     device: Device,
     renderer: WgpuRenderer,
+    event_processor: EventProcessor,
     displayed_texture: Option<TextureAndHandle>,
     next_texture: Option<TextureAndHandle>,
 }
@@ -27,17 +43,41 @@ struct ActiveRenderer {
 pub struct MapPaintSource {
     map: Map,
     active: Option<ActiveRenderer>,
+    rx: Receiver<MapEvent>,
+    tx: Sender<MapEvent>,
     last_size: (u32, u32),
 }
 
 impl MapPaintSource {
     pub fn new() -> Self {
+        let (tx, rx) = channel();
         let map = create_map();
 
         Self {
             map,
             active: None,
+            rx,
+            tx,
             last_size: (0, 0),
+        }
+    }
+
+    pub fn sender(&self) -> Sender<MapEvent> {
+        self.tx.clone()
+    }
+
+    fn process_events(&mut self) {
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        while let Ok(event) = self.rx.try_recv() {
+            let raw = match event {
+                MapEvent::PointerMoved(x, y) => RawUserEvent::PointerMoved(Point2::new(x, y)),
+                MapEvent::ButtonPressed(b) => RawUserEvent::ButtonPressed(convert_button(b)),
+                MapEvent::ButtonReleased(b) => RawUserEvent::ButtonReleased(convert_button(b)),
+                MapEvent::Scroll(d) => RawUserEvent::Scroll(d),
+            };
+            active.event_processor.handle(raw, &mut self.map);
         }
     }
 }
@@ -53,9 +93,13 @@ impl CustomPaintSource for MapPaintSource {
             Size::new(1, 1),
         );
 
+        let mut event_processor = EventProcessor::default();
+        event_processor.add_handler(MapController::default());
+
         self.active = Some(ActiveRenderer {
             device,
             renderer,
+            event_processor,
             displayed_texture: None,
             next_texture: None,
         });
@@ -73,17 +117,14 @@ impl CustomPaintSource for MapPaintSource {
         scale: f64,
     ) -> Option<TextureHandle> {
         if width == 0 || height == 0 {
-            log::warn!("render called with 0 size ({width}x{height}) — canvas has no dimensions");
             return None;
         }
 
-        log::trace!("render {width}x{height} scale={scale}");
-
+        self.process_events();
         self.map.animate();
 
         let active = self.active.as_mut()?;
 
-        // Resize renderer + map when canvas dimensions change
         if self.last_size != (width, height) {
             self.last_size = (width, height);
             active.renderer.resize(Size::new(width, height));
@@ -99,27 +140,32 @@ impl CustomPaintSource for MapPaintSource {
             }
         }
 
-        // Ensure we have a render target texture
         if active.next_texture.is_none() {
             let texture = create_texture(&active.device, width, height);
             let handle = ctx.register_texture(texture.clone());
             active.next_texture = Some(TextureAndHandle { texture, handle });
         }
 
-        // Trigger async tile loading (required for tiles to appear)
         self.map.load_layers();
 
-        // Render into our texture
         let next = active.next_texture.as_ref().unwrap();
         let view = next.texture.create_view(&TextureViewDescriptor::default());
         active.renderer.render_to_texture_view(&self.map, &view);
 
         let handle = next.handle.clone();
 
-        // Double-buffer swap
         std::mem::swap(&mut active.next_texture, &mut active.displayed_texture);
 
         Some(handle)
+    }
+}
+
+
+fn convert_button(btn: MapMouseButton) -> MouseButton {
+    match btn {
+        MapMouseButton::Left => MouseButton::Left,
+        MapMouseButton::Right => MouseButton::Right,
+        MapMouseButton::Middle => MouseButton::Middle,
     }
 }
 
