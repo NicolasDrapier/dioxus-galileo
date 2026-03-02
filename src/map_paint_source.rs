@@ -1,17 +1,28 @@
+use std::f64::consts::TAU;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use dioxus_native::{CustomPaintCtx, CustomPaintSource, DeviceHandle, TextureHandle};
+use galileo::Color;
 use galileo::control::{EventProcessor, MapController, MouseButton, RawUserEvent};
 use galileo::galileo_types::cartesian::{Point2, Size};
+use galileo::galileo_types::geo::impls::GeoPoint2d;
+use galileo::galileo_types::geo::{Crs, NewGeoPoint};
+use galileo::galileo_types::impls::{ClosedContour, Polygon};
+use galileo::layer::feature_layer::FeatureLayer;
+use galileo::layer::feature_layer::symbol::SimplePolygonSymbol;
 use galileo::layer::raster_tile_layer::RasterTileLayerBuilder;
 use galileo::render::WgpuRenderer;
 use galileo::{Map, MapBuilder};
+use rand::RngExt;
 use wgpu::{
     Device, Extent3d, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     TextureViewDescriptor,
 };
 
 const MAP_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
+
+const PARIS_LAT: f64 = 48.8566;
+const PARIS_LON: f64 = 2.3522;
 
 pub enum MapEvent {
     PointerMoved(f64, f64),
@@ -160,7 +171,6 @@ impl CustomPaintSource for MapPaintSource {
     }
 }
 
-
 fn convert_button(btn: MapMouseButton) -> MouseButton {
     match btn {
         MapMouseButton::Left => MouseButton::Left,
@@ -169,16 +179,44 @@ fn convert_button(btn: MapMouseButton) -> MouseButton {
     }
 }
 
+fn make_hex_polygon(lat: f64, lon: f64) -> Polygon<GeoPoint2d> {
+    let radius = 0.5;
+    let points: Vec<GeoPoint2d> = (0..6)
+        .map(|i| {
+            let theta = (i as f64) * TAU / 6.0;
+            NewGeoPoint::latlon(lat + radius * theta.cos(), lon + radius * theta.sin())
+        })
+        .collect();
+
+    Polygon::new(ClosedContour::new(points), vec![])
+}
+
 fn create_map() -> Map {
     let raster_layer = RasterTileLayerBuilder::new_osm()
         .with_file_cache_checked(".tile_cache")
         .build()
         .expect("failed to create OSM tile layer");
 
+    let mut rng = rand::rng();
+    let hexes: Vec<Polygon<GeoPoint2d>> = (0..1000)
+        .into_iter()
+        .map(|_| {
+            let lat = rng.random_range(-90.0..90.0);
+            let lon = rng.random_range(-180.0..180.0);
+            make_hex_polygon(lat, lon)
+        })
+        .collect();
+
+    let symbol = SimplePolygonSymbol::new(Color::rgba(255, 100, 50, 120))
+        .with_stroke_color(Color::rgba(255, 50, 0, 255))
+        .with_stroke_width(3.0);
+    let polygon_layer = FeatureLayer::new(hexes, symbol, Crs::WGS84);
+
     MapBuilder::default()
-        .with_latlon(48.866667, 2.333333)
+        .with_latlon(PARIS_LAT, PARIS_LON)
         .with_z_level(8)
         .with_layer(raster_layer)
+        .with_layer(polygon_layer)
         .build()
 }
 
