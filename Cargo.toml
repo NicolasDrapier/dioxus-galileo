@@ -1,0 +1,15 @@
+[package]
+name = "dioxus-galileo"
+version = "0.1.0"
+authors = ["Nicolas Drapier <nicodu95drap@gmail.com>"]
+edition = "2024"
+
+[dependencies]
+dioxus = { version = "0.7.3" }
+dioxus-native = { git = "https://github.com/DioxusLabs/blitz" }
+galileo = { git = "https://github.com/galileo-map/galileo", default-features = false, features = ["wgpu", "serde", "image", "rustybuzz"] }
+galileo-types = { git = "https://github.com/galileo-map/galileo" }
+wgpu = "27"
+winit = "0.30"
+log = "0.4"
+env_logger = "0.11"
